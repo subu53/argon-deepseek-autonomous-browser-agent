@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Argon-DeepSeek Autonomous Browser Agent</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Top Bar -->
+    <header class="topbar">
+      <div class="brand">
+        <img src="icons/icon48.png" alt="Argon-DeepSeek logo" class="brand-icon" />
+        <div class="brand-text">
+          <h1>Argon-DeepSeek</h1>
+          <span class="subtitle">Autonomous Browser Agent</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="themeToggleBtn" class="icon-btn" title="Toggle Dark / Light Theme" aria-label="Toggle theme">
+          <span id="themeIcon">☀️</span>
+        </button>
+        <button id="settingsToggleBtn" class="icon-btn" title="Settings &amp; Memory" aria-label="Open Settings">
+          ⚙️
+        </button>
+      </div>
+    </header>
+
+    <!-- Status Strip -->
+    <section class="status-strip">
+      <div id="engineBadge" class="engine-badge plan-a">
+        <span class="dot"></span>
+        <span id="engineBadgeText">Plan A: Gemini</span>
+      </div>
+      <div class="run-meta">
+        <span id="statusPill" class="status-pill status-idle">Idle</span>
+        <span id="stepCounter" class="step-counter">Step 0 / 20</span>
+      </div>
+    </section>
+
+    <!-- Failover Notice Banner (hidden unless Plan B failover is active) -->
+    <div id="failoverBanner" class="failover-banner hidden" role="status">
+      <span class="failover-icon">⚡</span>
+      <span id="failoverBannerText">Switched to Plan B: DeepSeek Failsafe</span>
+    </div>
+
+    <!-- Safety Mode Bar -->
+    <section class="safety-bar" aria-label="Safety Mode">
+      <span class="safety-label">Safety Gate</span>
+      <div class="segmented-control" role="radiogroup" aria-label="Execution safety mode">
+        <button id="modeAskBtn" class="seg-btn active" type="button" data-mode="ask">
+          🛡️ Ask Before Submitting
+        </button>
+        <button id="modeAutoBtn" class="seg-btn" type="button" data-mode="auto">
+          ⚡ Full Auto
+        </button>
+      </div>
+    </section>
+
+    <!-- Human-in-the-Loop Confirmation Card -->
+    <section id="approvalCard" class="approval-card hidden" role="alertdialog" aria-labelledby="approvalTitle">
+      <div class="approval-header">
+        <span class="approval-badge">🛡️ Safety Confirmation Required</span>
+        <span id="approvalStep" class="approval-step">Step 1</span>
+      </div>
+      <h2 id="approvalTitle" class="approval-title">High-Risk Action Intercepted</h2>
+      <p id="approvalRule" class="approval-rule"></p>
+      <div class="approval-target" id="approvalTarget"></div>
+      <p id="approvalThought" class="approval-thought"></p>
+      <div class="approval-actions">
+        <button id="approveBtn" class="btn btn-primary" type="button">Approve &amp; Execute</button>
+        <button id="skipBtn" class="btn btn-secondary" type="button">Skip Step</button>
+        <button id="denyStopBtn" class="btn btn-danger" type="button">Stop Task</button>
+      </div>
+    </section>
+
+    <!-- Task Composer & Slash Shortcuts -->
+    <section class="composer-card">
+      <div class="shortcuts-row" aria-label="Quick slash shortcuts">
+        <button
+          class="shortcut-chip"
+          type="button"
+          data-command="/linkedin-replies"
+          title="Draft replies to unanswered comments on the current LinkedIn post and pause before posting"
+        >
+          /linkedin-replies
+        </button>
+        <button
+          class="shortcut-chip"
+          type="button"
+          data-command="/research-and-gmail"
+          title="Research the current page/company and draft an outreach email in Gmail"
+        >
+          /research-and-gmail
+        </button>
+        <button
+          class="shortcut-chip"
+          type="button"
+          data-command="/fill-application"
+          title="Populate visible form fields using saved User Profile memory"
+        >
+          /fill-application
+        </button>
+      </div>
+
+      <textarea
+        id="taskInput"
+        class="task-input"
+        rows="3"
+        placeholder="Tell Argon-DeepSeek what to do on this browser, or click a / shortcut above..."
+      ></textarea>
+
+      <div class="composer-controls">
+        <button id="runBtn" class="btn btn-primary" type="button">
+          ▶ Run Agent
+        </button>
+        <button id="pauseBtn" class="btn btn-secondary hidden" type="button">
+          ⏸ Pause
+        </button>
+        <button id="stopBtn" class="btn btn-danger hidden" type="button">
+          ■ Stop
+        </button>
+      </div>
+    </section>
+
+    <!-- Live Execution Log -->
+    <section class="log-section">
+      <div class="log-header">
+        <h2>Live Execution Log</h2>
+        <button id="clearLogBtn" class="text-btn" type="button">Clear</button>
+      </div>
+      <div id="logFeed" class="log-feed" aria-live="polite">
+        <div class="empty-state">
+          <p><strong>Ready to operate.</strong></p>
+          <p>Add your Gemini (Plan A) and DeepSeek (Plan B) API keys in <strong>⚙️ Settings</strong>, run the <strong>Dry-Run Test</strong>, then start a task.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings & Memory Slide-Over Drawer -->
+    <aside id="settingsDrawer" class="drawer hidden" aria-label="Settings and Persona Memory">
+      <div class="drawer-header">
+        <h2>Settings &amp; Memory</h2>
+        <button id="closeSettingsBtn" class="icon-btn" type="button" aria-label="Close Settings">✕</button>
+      </div>
+
+      <div class="drawer-body">
+        <div class="form-group">
+          <label for="geminiApiKey">Plan A — Google Gemini API Key (<code>GEMINI_API_KEY</code>)</label>
+          <div class="input-with-toggle">
+            <input id="geminiApiKey" type="password" autocomplete="off" placeholder="AIza..." />
+            <button type="button" class="reveal-btn" data-target="geminiApiKey" title="Show/Hide key">👁</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="planAModel">Plan A Model (Vision + DOM)</label>
+          <select id="planAModel"></select>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="form-group">
+          <label for="deepseekApiKey">Plan B — DeepSeek Failsafe Key (<code>DEEPSEEK_API_KEY</code>)</label>
+          <div class="input-with-toggle">
+            <input id="deepseekApiKey" type="password" autocomplete="off" placeholder="sk-..." />
+            <button type="button" class="reveal-btn" data-target="deepseekApiKey" title="Show/Hide key">👁</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="planBModel">Plan B Model (Structured DOM + Tools)</label>
+          <select id="planBModel"></select>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="maxSteps">Max ReAct Steps</label>
+            <input id="maxSteps" type="number" min="3" max="40" value="20" />
+          </div>
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label" for="useDebuggerFallback">
+              <input id="useDebuggerFallback" type="checkbox" />
+              <span>Debugger Click Fallback</span>
+            </label>
+            <small>Uses <code>chrome.debugger</code> CDP clicks if a site blocks synthetic DOM clicks.</small>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="userMemory">User Profile / Persona Memory</label>
+          <textarea
+            id="userMemory"
+            rows="6"
+            placeholder="Name: Alex Rivera&#10;Role: Founder at Acme AI&#10;Email: alex@acme.ai&#10;LinkedIn: https://linkedin.com/in/alexrivera&#10;Tone of Voice: Warm, concise, insightful, no corporate jargon&#10;Standard Application Details: Based in Austin, TX; authorized to work in US..."
+          ></textarea>
+          <small>Stored locally in <code>chrome.storage.local</code> and injected into every agent task.</small>
+        </div>
+
+        <div class="drawer-actions">
+          <button id="saveSettingsBtn" class="btn btn-primary" type="button">Save Settings</button>
+          <button id="dryRunBtn" class="btn btn-secondary" type="button">🧪 Dry-Run / Mock Test</button>
+        </div>
+        <div id="settingsToast" class="toast hidden" role="status"></div>
+
+        <!-- Dry-Run Diagnostic Output -->
+        <div id="diagnosticsBox" class="diagnostics-box hidden">
+          <h3>Dry-Run Diagnostics</h3>
+          <div id="diagnosticsResults" class="diagnostics-list"></div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
