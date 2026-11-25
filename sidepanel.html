@@ -29,9 +29,9 @@
 
     <!-- Status Strip -->
     <section class="status-strip">
-      <div id="engineBadge" class="engine-badge plan-a">
+      <div id="engineBadge" class="engine-badge plan-nano">
         <span class="dot"></span>
-        <span id="engineBadgeText">Plan A: Gemini</span>
+        <span id="engineBadgeText">Zero-Key Trial: Chrome Gemini Nano</span>
       </div>
       <div class="run-meta">
         <span id="statusPill" class="status-pill status-idle">Idle</span>
@@ -39,7 +39,7 @@
       </div>
     </section>
 
-    <!-- Failover Notice Banner (hidden unless Plan B failover is active) -->
+    <!-- Failover Notice Banner -->
     <div id="failoverBanner" class="failover-banner hidden" role="status">
       <span class="failover-icon">⚡</span>
       <span id="failoverBannerText">Switched to Plan B: DeepSeek Failsafe</span>
@@ -132,8 +132,8 @@
       </div>
       <div id="logFeed" class="log-feed" aria-live="polite">
         <div class="empty-state">
-          <p><strong>Ready to operate.</strong></p>
-          <p>Add your Gemini (Plan A) and DeepSeek (Plan B) API keys in <strong>⚙️ Settings</strong>, run the <strong>Dry-Run Test</strong>, then start a task.</p>
+          <p><strong>Zero-Key Trial Ready.</strong></p>
+          <p>Open <strong>⚙️ Settings</strong> to choose <strong>Chrome Built-in Gemini Nano</strong> (no API key), a <strong>Custom/Local Endpoint</strong> (Ollama / Groq / OpenRouter), or add your <strong>Gemini &amp; DeepSeek</strong> keys, then run the <strong>Dry-Run Test</strong>.</p>
         </div>
       </div>
     </section>
@@ -147,16 +147,59 @@
 
       <div class="drawer-body">
         <div class="form-group">
-          <label for="geminiApiKey">Plan A — Google Gemini API Key (<code>GEMINI_API_KEY</code>)</label>
-          <div class="input-with-toggle">
-            <input id="geminiApiKey" type="password" autocomplete="off" placeholder="AIza..." />
-            <button type="button" class="reveal-btn" data-target="geminiApiKey" title="Show/Hide key">👁</button>
+          <label for="planAMode">Plan A — Primary Engine Mode</label>
+          <select id="planAMode"></select>
+        </div>
+
+        <!-- Mode 1: Chrome Built-in Gemini Nano Hint -->
+        <div id="chromeNanoSection" class="info-callout">
+          <strong>Zero-Key Trial (On-Device Gemini Nano)</strong>
+          <p>Runs locally inside Chrome using the official Prompt API (<code>LanguageModel</code>) — no API key required.</p>
+          <small>If unavailable, enable <code>chrome://flags/#prompt-api-for-gemini-nano</code> and <code>chrome://flags/#optimization-guide-on-device-model</code>, then restart Chrome.</small>
+        </div>
+
+        <!-- Mode 2: Google Gemini Cloud API -->
+        <div id="geminiApiSection" class="mode-section hidden">
+          <div class="form-group">
+            <label for="geminiApiKey">Google Gemini API Key (<code>GEMINI_API_KEY</code>)</label>
+            <div class="input-with-toggle">
+              <input id="geminiApiKey" type="password" autocomplete="off" placeholder="AIza..." />
+              <button type="button" class="reveal-btn" data-target="geminiApiKey" title="Show/Hide key">👁</button>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="planAModel">Plan A Gemini Model (Vision + DOM)</label>
+            <select id="planAModel"></select>
           </div>
         </div>
 
-        <div class="form-group">
-          <label for="planAModel">Plan A Model (Vision + DOM)</label>
-          <select id="planAModel"></select>
+        <!-- Mode 3: Custom / Local OpenAI-Compatible Endpoint -->
+        <div id="customEndpointSection" class="mode-section hidden">
+          <div class="preset-row" aria-label="Quick endpoint presets">
+            <button type="button" class="preset-chip" data-preset="ollama">Ollama Local</button>
+            <button type="button" class="preset-chip" data-preset="lmstudio">LM Studio</button>
+            <button type="button" class="preset-chip" data-preset="openrouter">OpenRouter Free</button>
+            <button type="button" class="preset-chip" data-preset="groq">Groq Free</button>
+          </div>
+
+          <div class="form-group">
+            <label for="customBaseUrl">Chat Completions Endpoint URL</label>
+            <input id="customBaseUrl" type="text" autocomplete="off" placeholder="http://localhost:11434/v1/chat/completions" />
+          </div>
+
+          <div class="form-group">
+            <label for="customModel">Model Name</label>
+            <input id="customModel" type="text" autocomplete="off" placeholder="qwen2.5:7b" />
+          </div>
+
+          <div class="form-group">
+            <label for="customApiKey">API Key (Optional — leave blank for local Ollama / LM Studio)</label>
+            <div class="input-with-toggle">
+              <input id="customApiKey" type="password" autocomplete="off" placeholder="Optional bearer token" />
+              <button type="button" class="reveal-btn" data-target="customApiKey" title="Show/Hide key">👁</button>
+            </div>
+          </div>
         </div>
 
         <hr class="divider" />

@@ -4,16 +4,26 @@
  *
  * Orchestrates:
  * - ReAct loop (Observe -> Think -> Act -> Verify)
- * - Dual-provider Plan A (Gemini) -> Plan B (DeepSeek) seamless auto-failover
+ * - Plan A engines: Zero-Key Chrome Built-in Gemini Nano | Google Gemini Cloud API | Custom/Local Endpoint
+ * - Seamless Plan A -> Plan B (DeepSeek) auto-failover
  * - Human-in-the-Loop Safety Gate for high-risk actions
  * - Tab management, optional chrome.debugger fallback click, and Dry-Run diagnostics
  */
 
 import { loadSettings, saveSettings, expandSlashCommand } from './lib/config.js';
 import { evaluateActionSafety } from './lib/safety.js';
-import { decideNextAction, verifyGeminiKey, verifyDeepSeekKey } from './lib/providers.js';
+import {
+  decideNextAction,
+  verifyGeminiKey,
+  verifyDeepSeekKey,
+  verifyCustomEndpoint
+} from './lib/providers.js';
+import {
+  getLocalNanoApi,
+  checkLocalNanoAvailability,
+  runLocalNanoPrompt
+} from './lib/chrome_nano.js';
 
-// Open the Chrome Side Panel when the user clicks the extension toolbar icon
 chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(() => {
@@ -28,10 +38,10 @@ const agentState = {
   shortcutUsed: null,
   step: 0,
   maxSteps: 20,
-  activeProvider: 'gemini', // 'gemini' | 'deepseek'
-  activeModel: '',
-  failoverBanner: null, // e.g. "Switched to Plan B: DeepSeek Failsafe"
-  pendingApproval: null, // { id, toolCall, matchedRule, targetSummary, thought, step }
+  activeProvider: 'chrome-nano', // 'chrome-nano' | 'gemini' | 'custom-openai' | 'deepseek'
+  activeModel: 'gemini-nano (on-device)',
+  failoverBanner: null,
+  pendingApproval: null,
   logs: [],
   history: [],
   lastDomMap: [],
@@ -110,9 +120,6 @@ async function getOpenTabsSummary() {
   }));
 }
 
-/**
- * Guarantee content.js is injected on the target tab (handles tabs open before extension install).
- */
 async function ensureContentScript(tabId) {
   try {
     const ping = await chrome.tabs.sendMessage(tabId, { type: 'CONTENT_PING' });
@@ -120,7 +127,6 @@ async function ensureContentScript(tabId) {
   } catch {
     // Not injected yet
   }
-
   await chrome.scripting.executeScript({
     target: { tabId },
     files: ['content.js']
@@ -134,9 +140,6 @@ async function sendToTab(tabId, message) {
   return await chrome.tabs.sendMessage(tabId, message);
 }
 
-/**
- * Capture visible tab screenshot as base64 JPEG for Plan A (Gemini Vision).
- */
 async function captureViewportScreenshot(windowId) {
   try {
     const dataUrl = await chrome.tabs.captureVisibleTab(windowId, {
@@ -150,18 +153,11 @@ async function captureViewportScreenshot(windowId) {
   }
 }
 
-/**
- * Optional chrome.debugger CDP click fallback for sites that block synthetic DOM events.
- */
 async function debuggerClickFallback(tabId, x, y) {
   const target = { tabId };
   try {
     await chrome.debugger.attach(target, '1.3');
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
-      type: 'mouseMoved',
-      x,
-      y
-    });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', {
       type: 'mousePressed',
       x,
@@ -189,8 +185,38 @@ async function debuggerClickFallback(tabId, x, y) {
 }
 
 /**
- * OBSERVE phase: gather tabs, active tab DOM map, and optional screenshot (for Plan A).
+ * Run Chrome Built-in Gemini Nano directly in the service worker if exposed,
+ * or bridge cleanly to the open Side Panel window context.
  */
+async function executeChromeNanoPrompt({ systemPrompt, userPrompt }) {
+  if (getLocalNanoApi()) {
+    return await runLocalNanoPrompt({ systemPrompt, userPrompt });
+  }
+  const resp = await chrome.runtime.sendMessage({
+    type: 'SIDEPANEL_RUN_NANO',
+    payload: { systemPrompt, userPrompt }
+  });
+  if (!resp?.ok) {
+    throw new Error(resp?.error || 'Chrome Built-in Gemini Nano is not available.');
+  }
+  return resp.text;
+}
+
+async function checkChromeNanoAcrossContexts() {
+  if (getLocalNanoApi()) {
+    return await checkLocalNanoAvailability();
+  }
+  try {
+    const resp = await chrome.runtime.sendMessage({ type: 'SIDEPANEL_CHECK_NANO' });
+    if (resp && typeof resp.available === 'boolean') {
+      return resp;
+    }
+  } catch {
+    // Side panel closed
+  }
+  return await checkLocalNanoAvailability();
+}
+
 async function observeBrowser(includeScreenshot) {
   const [activeTab, tabs] = await Promise.all([getActiveTab(), getOpenTabsSummary()]);
   if (!activeTab) {
@@ -241,9 +267,6 @@ async function observeBrowser(includeScreenshot) {
   };
 }
 
-/**
- * Wait for tab load completion after opening or navigating a tab.
- */
 function waitForTabReady(tabId, timeoutMs = 8000) {
   return new Promise((resolve) => {
     let settled = false;
@@ -264,9 +287,6 @@ function waitForTabReady(tabId, timeoutMs = 8000) {
   });
 }
 
-/**
- * ACT phase: execute a single agent tool call.
- */
 async function executeToolCall(toolCall, activeTabId, settings) {
   const { name, args = {} } = toolCall;
 
@@ -304,8 +324,7 @@ async function executeToolCall(toolCall, activeTabId, settings) {
 
     case 'extract_page_text': {
       if (!activeTabId) return { ok: false, error: 'No active tab to extract text from.' };
-      const res = await sendToTab(activeTabId, { type: 'CONTENT_EXTRACT_TEXT', payload: args });
-      return res;
+      return await sendToTab(activeTabId, { type: 'CONTENT_EXTRACT_TEXT', payload: args });
     }
 
     case 'open_tab': {
@@ -349,9 +368,6 @@ async function executeToolCall(toolCall, activeTabId, settings) {
   }
 }
 
-/**
- * Pause loop cleanly until resumed or stopped.
- */
 async function waitIfPaused(myRunId) {
   while (agentState.status === 'paused' && agentState.runId === myRunId) {
     await new Promise((resolve) => {
@@ -360,14 +376,10 @@ async function waitIfPaused(myRunId) {
   }
 }
 
-/**
- * Pause for Human-in-the-Loop approval on high-risk actions.
- */
 function requestHumanApproval(payload) {
   agentState.status = 'awaiting_approval';
   agentState.pendingApproval = payload;
   broadcastState();
-
   return new Promise((resolve) => {
     approvalResolver = resolve;
   });
@@ -385,9 +397,27 @@ function resolveHumanApproval(decision) {
   resolve(decision);
 }
 
-/**
- * Main ReAct (Observe -> Think -> Act -> Verify) autonomous execution loop.
- */
+function resolveInitialProvider(settings) {
+  const mode = settings.planAMode || 'chrome-nano';
+  if (mode === 'chrome-nano') {
+    return { provider: 'chrome-nano', model: 'gemini-nano (on-device)', failoverBanner: null };
+  }
+  if (mode === 'custom-openai') {
+    return { provider: 'custom-openai', model: settings.customModel || 'local-model', failoverBanner: null };
+  }
+  if (settings.geminiApiKey && settings.geminiApiKey.trim()) {
+    return { provider: 'gemini', model: settings.planAModel, failoverBanner: null };
+  }
+  if (settings.deepseekApiKey && settings.deepseekApiKey.trim()) {
+    return {
+      provider: 'deepseek',
+      model: settings.planBModel,
+      failoverBanner: 'Switched to Plan B: DeepSeek Failsafe'
+    };
+  }
+  return { provider: 'gemini', model: settings.planAModel, failoverBanner: null };
+}
+
 async function startAgentTask(rawInput) {
   const settings = await loadSettings();
   const { expandedPrompt, shortcutUsed } = expandSlashCommand(rawInput);
@@ -397,7 +427,6 @@ async function startAgentTask(rawInput) {
     return;
   }
 
-  // Stop any prior run cleanly
   const myRunId = agentState.runId + 1;
   if (approvalResolver) resolveHumanApproval('stop');
   if (pauseResolver) {
@@ -405,7 +434,7 @@ async function startAgentTask(rawInput) {
     pauseResolver = null;
   }
 
-  const startOnGemini = Boolean(settings.geminiApiKey && settings.geminiApiKey.trim());
+  const initial = resolveInitialProvider(settings);
 
   agentState.runId = myRunId;
   agentState.status = 'running';
@@ -414,9 +443,9 @@ async function startAgentTask(rawInput) {
   agentState.shortcutUsed = shortcutUsed;
   agentState.step = 0;
   agentState.maxSteps = Math.max(3, Math.min(Number(settings.maxSteps) || 20, 40));
-  agentState.activeProvider = startOnGemini ? 'gemini' : 'deepseek';
-  agentState.activeModel = startOnGemini ? settings.planAModel : settings.planBModel;
-  agentState.failoverBanner = startOnGemini ? null : 'Switched to Plan B: DeepSeek Failsafe';
+  agentState.activeProvider = initial.provider;
+  agentState.activeModel = initial.model;
+  agentState.failoverBanner = initial.failoverBanner;
   agentState.pendingApproval = null;
   agentState.logs = [];
   agentState.history = [];
@@ -445,14 +474,14 @@ async function startAgentTask(rawInput) {
         step,
         title: `Step ${step}: Observing page`,
         detail: needVision
-          ? 'Capturing Interactive DOM Map + viewport vision screenshot (Plan A)'
-          : 'Capturing structured Interactive DOM Map (Plan B)'
+          ? 'Capturing Interactive DOM Map + viewport vision screenshot (Plan A: Gemini Cloud)'
+          : 'Capturing structured Interactive DOM Map'
       });
 
       const observation = await observeBrowser(needVision);
       if (agentState.runId !== myRunId || agentState.status === 'stopped') break;
 
-      // 2. THINK (with automatic Plan A -> Plan B failover)
+      // 2. THINK (with automatic Plan A -> Plan B DeepSeek failover)
       const decision = await decideNextAction({
         settings: liveSettings,
         activeProvider: agentState.activeProvider,
@@ -461,6 +490,7 @@ async function startAgentTask(rawInput) {
         maxSteps: agentState.maxSteps,
         observation,
         history: agentState.history,
+        nanoRunner: executeChromeNanoPrompt,
         onFailover: ({ reason }) => {
           agentState.activeProvider = 'deepseek';
           agentState.activeModel = liveSettings.planBModel;
@@ -528,7 +558,8 @@ async function startAgentTask(rawInput) {
             provider: decision.provider,
             thought,
             toolCall,
-            result: 'USER_SKIPPED_HIGH_RISK_ACTION: Do not retry this exact high-risk click unless asked. Consider finishing and letting the user review.'
+            result:
+              'USER_SKIPPED_HIGH_RISK_ACTION: Do not retry this exact high-risk click unless asked. Consider finishing and letting the user review.'
           });
           continue;
         }
@@ -575,7 +606,7 @@ async function startAgentTask(rawInput) {
         step,
         provider: decision.provider,
         title: result?.ok ? `Verified: ${toolCall.name}` : `Action error: ${toolCall.name}`,
-        detail: result?.ok ? (result.message || 'Succeeded') : (result?.error || 'Unknown error')
+        detail: result?.ok ? result.message || 'Succeeded' : result?.error || 'Unknown error'
       });
     }
 
@@ -584,7 +615,7 @@ async function startAgentTask(rawInput) {
       addLog({
         level: 'warning',
         title: 'Reached maximum step limit',
-        detail: `Stopped after ${agentState.maxSteps} steps. You can increase Max Steps in Settings or continue with a follow-up prompt.`
+        detail: `Stopped after ${agentState.maxSteps} steps. Increase Max Steps in Settings or continue with a follow-up prompt.`
       });
     }
   } catch (err) {
@@ -643,18 +674,16 @@ function togglePauseTask() {
   broadcastState();
 }
 
-/**
- * Built-in Dry-Run / Mock Test:
- * 1. Verifies Plan A (Gemini) API key & model connectivity
- * 2. Verifies Plan B (DeepSeek) API key & model connectivity
- * 3. Tests live DOM element indexing on the currently active tab
- */
 async function runDiagnostics(overrideSettings = {}) {
   const saved = await loadSettings();
   const cfg = { ...saved, ...overrideSettings };
 
-  const [gemini, deepseek, domCheck] = await Promise.all([
+  const [chromeNano, gemini, customEndpoint, deepseek, domCheck] = await Promise.all([
+    checkChromeNanoAcrossContexts(),
     verifyGeminiKey(cfg.geminiApiKey, cfg.planAModel),
+    cfg.planAMode === 'custom-openai'
+      ? verifyCustomEndpoint(cfg.customBaseUrl, cfg.customApiKey, cfg.customModel)
+      : Promise.resolve({ ok: false, skipped: true, status: 0, latencyMs: 0, message: 'Not selected' }),
     verifyDeepSeekKey(cfg.deepseekApiKey, cfg.planBModel),
     (async () => {
       const tab = await getActiveTab();
@@ -664,7 +693,7 @@ async function runDiagnostics(overrideSettings = {}) {
           ok: false,
           count: 0,
           url: tab.url,
-          message: `Active tab is a restricted Chrome URL (${tab.url}). Open a regular webpage (e.g. LinkedIn, Gmail, or example.com) to test DOM indexing.`
+          message: `Active tab is a restricted Chrome URL (${tab.url}). Open a regular webpage to test DOM indexing.`
         };
       }
       try {
@@ -691,7 +720,10 @@ async function runDiagnostics(overrideSettings = {}) {
   return {
     ok: true,
     timestamp: nowIso(),
+    planAMode: cfg.planAMode,
+    chromeNano,
     gemini,
+    customEndpoint,
     deepseek,
     domCheck
   };
@@ -703,6 +735,7 @@ function sleep(ms) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.type) return false;
+  if (message.type.startsWith('SIDEPANEL_')) return false;
 
   (async () => {
     try {
@@ -717,12 +750,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         case 'SAVE_SETTINGS': {
           const updated = await saveSettings(message.payload || {});
+          if (agentState.status === 'idle') {
+            const initial = resolveInitialProvider(updated);
+            agentState.activeProvider = initial.provider;
+            agentState.activeModel = initial.model;
+            broadcastState();
+          }
           sendResponse({ ok: true, settings: updated });
           break;
         }
 
         case 'START_TASK':
-          // Kick off asynchronously so the message port responds immediately
           startAgentTask(message.payload?.prompt || '');
           sendResponse({ ok: true });
           break;

@@ -1,9 +1,18 @@
 /**
  * Argon-DeepSeek Autonomous Browser Agent
- * Side Panel UI Controller
+ * Side Panel UI Controller + Chrome Built-in Gemini Nano Window Bridge
  */
 
-import { PLAN_A_MODELS, PLAN_B_MODELS } from './lib/config.js';
+import {
+  PLAN_A_MODES,
+  PLAN_A_MODELS,
+  PLAN_B_MODELS,
+  CUSTOM_ENDPOINT_PRESETS
+} from './lib/config.js';
+import {
+  checkLocalNanoAvailability,
+  runLocalNanoPrompt
+} from './lib/chrome_nano.js';
 
 const els = {
   html: document.documentElement,
@@ -41,8 +50,17 @@ const els = {
   clearLogBtn: document.getElementById('clearLogBtn'),
   logFeed: document.getElementById('logFeed'),
 
+  planAMode: document.getElementById('planAMode'),
+  chromeNanoSection: document.getElementById('chromeNanoSection'),
+  geminiApiSection: document.getElementById('geminiApiSection'),
+  customEndpointSection: document.getElementById('customEndpointSection'),
+  presetChips: document.querySelectorAll('.preset-chip'),
+
   geminiApiKey: document.getElementById('geminiApiKey'),
   planAModel: document.getElementById('planAModel'),
+  customBaseUrl: document.getElementById('customBaseUrl'),
+  customModel: document.getElementById('customModel'),
+  customApiKey: document.getElementById('customApiKey'),
   deepseekApiKey: document.getElementById('deepseekApiKey'),
   planBModel: document.getElementById('planBModel'),
   maxSteps: document.getElementById('maxSteps'),
@@ -62,7 +80,15 @@ function sendBg(type, payload = {}) {
   return chrome.runtime.sendMessage({ type, payload });
 }
 
-function populateModelSelects() {
+function populateSelects() {
+  els.planAMode.innerHTML = '';
+  for (const mode of PLAN_A_MODES) {
+    const opt = document.createElement('option');
+    opt.value = mode.id;
+    opt.textContent = mode.label;
+    els.planAMode.appendChild(opt);
+  }
+
   els.planAModel.innerHTML = '';
   for (const m of PLAN_A_MODELS) {
     const opt = document.createElement('option');
@@ -80,6 +106,12 @@ function populateModelSelects() {
   }
 }
 
+function updatePlanAModeSections(mode) {
+  els.chromeNanoSection.classList.toggle('hidden', mode !== 'chrome-nano');
+  els.geminiApiSection.classList.toggle('hidden', mode !== 'gemini-api');
+  els.customEndpointSection.classList.toggle('hidden', mode !== 'custom-openai');
+}
+
 function applyTheme(theme) {
   const mode = theme === 'light' ? 'light' : 'dark';
   els.html.setAttribute('data-theme', mode);
@@ -94,8 +126,15 @@ function applySafetyModeUI(mode) {
 
 function applySettingsToForm(settings) {
   currentSettings = settings;
+  const mode = settings.planAMode || 'chrome-nano';
+  els.planAMode.value = mode;
+  updatePlanAModeSections(mode);
+
   els.geminiApiKey.value = settings.geminiApiKey || '';
   els.planAModel.value = settings.planAModel || PLAN_A_MODELS[0].id;
+  els.customBaseUrl.value = settings.customBaseUrl || 'http://localhost:11434/v1/chat/completions';
+  els.customModel.value = settings.customModel || 'qwen2.5:7b';
+  els.customApiKey.value = settings.customApiKey || '';
   els.deepseekApiKey.value = settings.deepseekApiKey || '';
   els.planBModel.value = settings.planBModel || PLAN_B_MODELS[0].id;
   els.maxSteps.value = settings.maxSteps || 20;
@@ -107,8 +146,12 @@ function applySettingsToForm(settings) {
 
 function collectFormSettings() {
   return {
+    planAMode: els.planAMode.value,
     geminiApiKey: els.geminiApiKey.value.trim(),
     planAModel: els.planAModel.value,
+    customBaseUrl: els.customBaseUrl.value.trim(),
+    customModel: els.customModel.value.trim() || 'qwen2.5:7b',
+    customApiKey: els.customApiKey.value.trim(),
     deepseekApiKey: els.deepseekApiKey.value.trim(),
     planBModel: els.planBModel.value,
     maxSteps: Math.max(3, Math.min(Number(els.maxSteps.value) || 20, 40)),
@@ -125,18 +168,43 @@ function showToast(message) {
   }, 2600);
 }
 
+function formatProviderMeta(provider, model) {
+  if (provider === 'deepseek') {
+    return {
+      badgeClass: 'plan-b',
+      label: `Plan B: DeepSeek${model ? ` (${model})` : ''}`,
+      miniLabel: 'Plan B: DeepSeek'
+    };
+  }
+  if (provider === 'chrome-nano') {
+    return {
+      badgeClass: 'plan-nano',
+      label: 'Zero-Key Trial: Chrome Gemini Nano',
+      miniLabel: 'Chrome Nano'
+    };
+  }
+  if (provider === 'custom-openai') {
+    return {
+      badgeClass: 'plan-custom',
+      label: `Custom/Local${model ? ` (${model})` : ''}`,
+      miniLabel: 'Custom/Local'
+    };
+  }
+  return {
+    badgeClass: 'plan-a',
+    label: `Plan A: Gemini${model ? ` (${model})` : ''}`,
+    miniLabel: 'Plan A: Gemini'
+  };
+}
+
 function renderState(state) {
   if (!state) return;
   currentState = state;
 
-  // Engine Badge
-  const isDeepSeek = state.activeProvider === 'deepseek';
-  els.engineBadge.className = `engine-badge ${isDeepSeek ? 'plan-b' : 'plan-a'}`;
-  els.engineBadgeText.textContent = isDeepSeek
-    ? `Plan B: DeepSeek${state.activeModel ? ` (${state.activeModel})` : ''}`
-    : `Plan A: Gemini${state.activeModel ? ` (${state.activeModel})` : ''}`;
+  const meta = formatProviderMeta(state.activeProvider, state.activeModel);
+  els.engineBadge.className = `engine-badge ${meta.badgeClass}`;
+  els.engineBadgeText.textContent = meta.label;
 
-  // Status Pill
   const statusLabels = {
     idle: 'Idle',
     running: 'Running',
@@ -149,10 +217,8 @@ function renderState(state) {
   els.statusPill.textContent = statusLabels[state.status] || state.status;
   els.statusPill.className = `status-pill status-${state.status}`;
 
-  // Step counter
   els.stepCounter.textContent = `Step ${state.step || 0} / ${state.maxSteps || currentSettings?.maxSteps || 20}`;
 
-  // Failover Banner
   if (state.failoverBanner) {
     els.failoverBannerText.textContent = state.failoverBanner;
     els.failoverBanner.classList.remove('hidden');
@@ -160,14 +226,12 @@ function renderState(state) {
     els.failoverBanner.classList.add('hidden');
   }
 
-  // Controls visibility
   const activeRun = ['running', 'paused', 'awaiting_approval'].includes(state.status);
   els.runBtn.disabled = activeRun;
   els.pauseBtn.classList.toggle('hidden', !activeRun || state.status === 'awaiting_approval');
   els.stopBtn.classList.toggle('hidden', !activeRun);
   els.pauseBtn.textContent = state.status === 'paused' ? '▶ Resume' : '⏸ Pause';
 
-  // Human-in-the-Loop Confirmation Card
   if (state.status === 'awaiting_approval' && state.pendingApproval) {
     const p = state.pendingApproval;
     els.approvalStep.textContent = `Step ${p.step}`;
@@ -179,7 +243,6 @@ function renderState(state) {
     els.approvalCard.classList.add('hidden');
   }
 
-  // Logs Feed
   renderLogs(state.logs || []);
 }
 
@@ -187,8 +250,8 @@ function renderLogs(logs) {
   if (!logs.length) {
     els.logFeed.innerHTML = `
       <div class="empty-state">
-        <p><strong>Ready to operate.</strong></p>
-        <p>Add your Gemini (Plan A) and DeepSeek (Plan B) API keys in <strong>⚙️ Settings</strong>, run the <strong>Dry-Run Test</strong>, then start a task.</p>
+        <p><strong>Zero-Key Trial Ready.</strong></p>
+        <p>Open <strong>⚙️ Settings</strong> to choose <strong>Chrome Built-in Gemini Nano</strong> (no API key), a <strong>Custom/Local Endpoint</strong> (Ollama / Groq / OpenRouter), or add your <strong>Gemini &amp; DeepSeek</strong> keys, then run the <strong>Dry-Run Test</strong>.</p>
       </div>
     `;
     return;
@@ -209,10 +272,11 @@ function renderLogs(logs) {
     const tags = document.createElement('div');
     tags.className = 'log-tags';
 
-    if (entry.provider === 'gemini' || entry.provider === 'deepseek') {
+    if (entry.provider) {
+      const meta = formatProviderMeta(entry.provider, '');
       const pTag = document.createElement('span');
       pTag.className = `mini-provider ${entry.provider}`;
-      pTag.textContent = entry.provider === 'gemini' ? 'Plan A: Gemini' : 'Plan B: DeepSeek';
+      pTag.textContent = meta.miniLabel;
       tags.appendChild(pTag);
     }
 
@@ -246,7 +310,13 @@ function renderDiagnostics(report) {
 
   const rows = [
     {
-      label: `Plan A: Gemini (${els.planAModel.value})`,
+      label: 'Zero-Key Trial: Chrome Built-in Gemini Nano',
+      status: report.chromeNano?.available ? 'pass' : report.planAMode === 'chrome-nano' ? 'fail' : 'skip',
+      badge: report.chromeNano?.available ? report.chromeNano.state.toUpperCase() : 'UNAVAILABLE',
+      detail: report.chromeNano?.message || 'Not detected'
+    },
+    {
+      label: `Plan A: Gemini Cloud (${els.planAModel.value})`,
       status: report.gemini.skipped ? 'skip' : report.gemini.ok ? 'pass' : 'fail',
       badge: report.gemini.skipped
         ? 'SKIPPED'
@@ -254,7 +324,21 @@ function renderDiagnostics(report) {
           ? `PASS · ${report.gemini.latencyMs}ms`
           : `FAIL (${report.gemini.status || 'ERR'})`,
       detail: report.gemini.message
-    },
+    }
+  ];
+
+  if (report.planAMode === 'custom-openai' && report.customEndpoint) {
+    rows.push({
+      label: `Custom / Local (${els.customModel.value || 'custom'})`,
+      status: report.customEndpoint.skipped ? 'skip' : report.customEndpoint.ok ? 'pass' : 'fail',
+      badge: report.customEndpoint.ok
+        ? `PASS · ${report.customEndpoint.latencyMs}ms`
+        : `FAIL (${report.customEndpoint.status || 'ERR'})`,
+      detail: report.customEndpoint.message
+    });
+  }
+
+  rows.push(
     {
       label: `Plan B: DeepSeek (${els.planBModel.value})`,
       status: report.deepseek.skipped ? 'skip' : report.deepseek.ok ? 'pass' : 'fail',
@@ -273,7 +357,7 @@ function renderDiagnostics(report) {
         report.domCheck.message +
         (report.domCheck.sample?.length ? `\nSample: ${report.domCheck.sample.join(' | ')}` : '')
     }
-  ];
+  );
 
   for (const row of rows) {
     const div = document.createElement('div');
@@ -308,14 +392,12 @@ async function handleRunTask() {
 }
 
 function bindEvents() {
-  // Theme toggle
   els.themeToggleBtn.addEventListener('click', async () => {
     const nextTheme = els.html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
     applyTheme(nextTheme);
     await sendBg('SAVE_SETTINGS', { theme: nextTheme });
   });
 
-  // Settings drawer open/close
   els.settingsToggleBtn.addEventListener('click', () => {
     els.settingsDrawer.classList.remove('hidden');
   });
@@ -323,7 +405,20 @@ function bindEvents() {
     els.settingsDrawer.classList.add('hidden');
   });
 
-  // Reveal API key buttons
+  els.planAMode.addEventListener('change', () => {
+    updatePlanAModeSections(els.planAMode.value);
+  });
+
+  els.presetChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const preset = CUSTOM_ENDPOINT_PRESETS[chip.dataset.preset];
+      if (!preset) return;
+      els.customBaseUrl.value = preset.baseUrl;
+      els.customModel.value = preset.model;
+      showToast(`Applied preset: ${preset.name}`);
+    });
+  });
+
   document.querySelectorAll('.reveal-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const input = document.getElementById(btn.dataset.target);
@@ -332,7 +427,6 @@ function bindEvents() {
     });
   });
 
-  // Safety mode toggle
   [els.modeAskBtn, els.modeAutoBtn].forEach((btn) => {
     btn.addEventListener('click', async () => {
       const mode = btn.dataset.mode;
@@ -342,7 +436,6 @@ function bindEvents() {
     });
   });
 
-  // Slash shortcut chips
   els.shortcutChips.forEach((chip) => {
     chip.addEventListener('click', () => {
       const cmd = chip.dataset.command;
@@ -357,7 +450,6 @@ function bindEvents() {
     });
   });
 
-  // Task execution controls
   els.runBtn.addEventListener('click', handleRunTask);
   els.taskInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -370,12 +462,10 @@ function bindEvents() {
   els.stopBtn.addEventListener('click', () => sendBg('STOP_TASK'));
   els.clearLogBtn.addEventListener('click', () => sendBg('CLEAR_LOGS'));
 
-  // Safety confirmation card actions
   els.approveBtn.addEventListener('click', () => sendBg('RESOLVE_APPROVAL', { decision: 'approve' }));
   els.skipBtn.addEventListener('click', () => sendBg('RESOLVE_APPROVAL', { decision: 'skip' }));
   els.denyStopBtn.addEventListener('click', () => sendBg('RESOLVE_APPROVAL', { decision: 'stop' }));
 
-  // Settings save
   els.saveSettingsBtn.addEventListener('click', async () => {
     const payload = collectFormSettings();
     const res = await sendBg('SAVE_SETTINGS', payload);
@@ -385,13 +475,13 @@ function bindEvents() {
     }
   });
 
-  // Built-in Dry-Run / Mock Test
   els.dryRunBtn.addEventListener('click', async () => {
     const payload = collectFormSettings();
     els.dryRunBtn.disabled = true;
     els.dryRunBtn.textContent = 'Testing...';
     els.diagnosticsBox.classList.remove('hidden');
-    els.diagnosticsResults.innerHTML = '<div class="diag-row">Running Gemini, DeepSeek, and active tab DOM checks...</div>';
+    els.diagnosticsResults.innerHTML =
+      '<div class="diag-row">Checking Chrome Gemini Nano, API providers, and active tab DOM indexing...</div>';
     try {
       const report = await sendBg('RUN_DIAGNOSTICS', payload);
       if (report?.ok) {
@@ -407,16 +497,33 @@ function bindEvents() {
     }
   });
 
-  // Live background state push updates
-  chrome.runtime.onMessage.addListener((message) => {
+  // Live background updates + Side Panel bridge for Chrome Built-in Gemini Nano (window.LanguageModel)
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'STATE_UPDATE') {
       renderState(message.payload);
+      return false;
     }
+
+    if (message?.type === 'SIDEPANEL_CHECK_NANO') {
+      checkLocalNanoAvailability()
+        .then((res) => sendResponse(res))
+        .catch((err) => sendResponse({ available: false, state: 'error', message: err.message }));
+      return true;
+    }
+
+    if (message?.type === 'SIDEPANEL_RUN_NANO') {
+      runLocalNanoPrompt(message.payload || {})
+        .then((text) => sendResponse({ ok: true, text }))
+        .catch((err) => sendResponse({ ok: false, error: err.message }));
+      return true;
+    }
+
+    return false;
   });
 }
 
 async function init() {
-  populateModelSelects();
+  populateSelects();
   bindEvents();
 
   const [settingsRes, stateRes] = await Promise.all([
